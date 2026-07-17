@@ -70,6 +70,10 @@ class Updater
 		{
 			updateMacos(bootstrap, launcherSettings, args);
 		}
+		else if (OS.getOs() == OS.OSType.Linux)
+		{
+			updateLinux(bootstrap, launcherSettings, args);
+		}
 	}
 
 	private static int getPid()
@@ -82,6 +86,102 @@ class Updater
 		catch (Exception e)
 		{
 			return -1;
+		}
+	}
+
+	private static void updateLinux(Bootstrap bootstrap, LauncherSettings launcherSettings, String[] args)
+	{
+		String appimage = System.getenv("APPIMAGE");
+		if (appimage == null)
+		{
+			log.debug("Skipping update check due to not running from appimage");
+			return;
+		}
+
+		log.debug("Running from appimage");
+
+		var newestUpdate = findAvailableUpdate(bootstrap);
+		if (newestUpdate == null)
+		{
+			return;
+		}
+
+		if (launcherSettings.isNoupdates())
+		{
+			log.info("Skipping update {} due to noupdate being set", newestUpdate.getVersion());
+			return;
+		}
+
+		if (System.getenv(LauncherProperties.getName().toUpperCase() + "_UPGRADE") != null)
+		{
+			log.info("Skipping update {} due to launching from an upgrade", newestUpdate.getVersion());
+			return;
+		}
+
+		var settings = LauncherSettings.loadSettings();
+		if (checkBackoff(settings, newestUpdate))
+		{
+			return;
+		}
+
+		// check if rollout allows this update
+		if (newestUpdate.getRollout() > 0. && Math.random() > newestUpdate.getRollout())
+		{
+			log.info("Skipping update {} due to rollout", newestUpdate.getVersion());
+			return;
+		}
+
+		// from here and below the update will be attempted. update settings early so a failed
+		// download counts as an attempt.
+		settings.lastUpdateAttemptTime = System.currentTimeMillis();
+		settings.lastUpdateHash = newestUpdate.getHash();
+		settings.lastUpdateAttemptNum++;
+		LauncherSettings.saveSettings(settings);
+
+		try
+		{
+			log.info("Downloading launcher {} from {}", newestUpdate.getVersion(), newestUpdate.getUrl());
+
+			var file = Files.createTempFile("rlupdate", "AppImage");
+			try (OutputStream fout = Files.newOutputStream(file))
+			{
+				final var name = newestUpdate.getName();
+				final var size = newestUpdate.getSize();
+				try
+				{
+					download(newestUpdate.getUrl(), newestUpdate.getHash(), (completed) ->
+							SplashScreen.stage(.07, 1., null, name, completed, size, true),
+						fout);
+				}
+				catch (VerificationException e)
+				{
+					log.error("unable to verify update", e);
+					file.toFile().delete();
+					return;
+				}
+			}
+
+			// point of no return
+			Path appimagePath = Paths.get(appimage);
+			log.debug("Installing new appimage to {}", appimage);
+			var permissions = Files.getPosixFilePermissions(appimagePath);
+			Files.move(file.toAbsolutePath(), appimagePath, StandardCopyOption.REPLACE_EXISTING);
+			Files.setPosixFilePermissions(appimagePath, permissions);
+
+			log.debug("Done! Launching...");
+
+			List<String> launchCmd = new ArrayList<>(args.length + 1);
+			launchCmd.add(appimagePath.toAbsolutePath().toString());
+			launchCmd.addAll(Arrays.asList(args));
+			var pb = new ProcessBuilder(launchCmd);
+			pb.environment().put(LauncherProperties.getName().toUpperCase() + "_UPGRADE", "1");
+			pb.start();
+
+			System.exit(0);
+		}
+		catch (Exception e)
+		{
+			log.error("error performing upgrade", e);
 		}
 	}
 

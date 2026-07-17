@@ -40,6 +40,7 @@ import java.nio.file.FileStore;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.util.Collections;
 import java.util.List;
@@ -168,8 +169,8 @@ class LauncherSettings
 
 	private static Path launcherSettingsFile() throws IOException
 	{
-		Path settingsFile = Path.of(SETTINGS_FILE_NAME);
-		FileStore fileStore = Files.getFileStore(Path.of(""));
+		Path settingsFile = Paths.get(SETTINGS_FILE_NAME);
+		FileStore fileStore = Files.getFileStore(Paths.get(""));
 		// the AppImage is mounted readonly, so we instead place the launcher settings file in RUNELITE_DIR
 		if (fileStore.isReadOnly())
 		{
