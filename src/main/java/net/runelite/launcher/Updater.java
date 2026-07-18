@@ -58,8 +58,6 @@ import org.w3c.dom.NodeList;
 @Slf4j
 class Updater
 {
-	private static final String RUNELITE_APP = "/Applications/" + LauncherProperties.getName() + ".app";
-
 	static void update(Bootstrap bootstrap, LauncherSettings launcherSettings, String[] args)
 	{
 		if (OS.getOs() == OS.OSType.Windows)
@@ -210,26 +208,31 @@ class Updater
 			return;
 		}
 
-		Path path = Paths.get(command.split(" ")[0]).toAbsolutePath().normalize();
+		Path runeliteBin = Paths.get(command.split(" ")[0]);
 
-		// Fix for packr cwd on macOS:
-		// If the executable path looks like .../RuneLite.app/Contents/Resources/./RuneLite
-		// the real executable is at .../RuneLite.app/Contents/MacOS/RuneLite
-		if (path.toString().contains("/Contents/Resources/"))
-		{
-			path = path.getParent()  // Resources
-					.resolveSibling("MacOS")
-					.resolve(path.getFileName())
-					.normalize();
-		}
+		// on macOS packr changes the cwd to the resource directory prior to launching the JVM,
+		// causing the process command to be .../<App>.app/Contents/Resources/./<App>
+		// despite the executable really being at .../<App>.app/Contents/MacOS/<App>
+		runeliteBin = runeliteBin.normalize()
+			.resolveSibling(Paths.get("..", "MacOS", runeliteBin.getFileName().toString()))
+			.normalize()
+			.toAbsolutePath();
 
-		if (!path.getFileName().toString().equals(LAUNCHER_EXECUTABLE_NAME_OSX) || !path.startsWith(RUNELITE_APP))
+		Path appDir = runeliteBin.resolve(Paths.get("..", "..", ".."))
+			.normalize()
+			.toAbsolutePath();
+
+		log.debug("runeliteBin: {} appDir: {}", runeliteBin, appDir);
+
+		final String appDirName = LauncherProperties.getName() + ".app";
+		if (!runeliteBin.getFileName().toString().equals(LAUNCHER_EXECUTABLE_NAME_OSX) || !appDirName.equals(appDir.getFileName().toString()))
 		{
-			log.debug("Skipping update check due to not running from installer, command is {}", command);
+			log.debug("Skipping update check due to not running from {}, command is {}",
+				appDirName, command);
 			return;
 		}
 
-		log.debug("Running from installer");
+		log.debug("Running from {}", appDirName);
 
 		Update newestUpdate = findAvailableUpdate(bootstrap);
 		if (newestUpdate == null)
@@ -321,14 +324,19 @@ class Updater
 			try (InputStream in = process.getInputStream())
 			{
 				mountPoint = parseHdiutilPlist(in);
+				if (mountPoint == null)
+				{
+					log.error("unable to determine dmg mount point");
+					return;
+				}
 			}
 
 			// Point of no return - remove old app and copy new
-			log.debug("Removing old install from {}", RUNELITE_APP);
-			delete(Paths.get(RUNELITE_APP));
+			log.debug("Removing old install from {}", appDir);
+			delete(appDir);
 
 			log.debug("Copying new install from {}", mountPoint);
-			copy(Paths.get(mountPoint, LauncherProperties.getName() + ".app"), Paths.get(RUNELITE_APP));
+			copy(Paths.get(mountPoint, LauncherProperties.getName() + ".app"), appDir);
 
 			log.debug("Unmounting dmg");
 			pb = new ProcessBuilder(
@@ -341,7 +349,7 @@ class Updater
 			log.debug("Done! Launching...");
 
 			List<String> launchCmd = new ArrayList<>(args.length + 1);
-			launchCmd.add(path.toAbsolutePath().toString());
+			launchCmd.add(runeliteBin.toAbsolutePath().toString());
 			launchCmd.addAll(Arrays.asList(args));
 
 			pb = new ProcessBuilder(launchCmd);
