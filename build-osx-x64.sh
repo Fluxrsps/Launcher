@@ -12,7 +12,7 @@ build() {
     shasum -a 256 build/libs/"$name".jar
 
     pushd native
-    cmake -DCMAKE_OSX_ARCHITECTURES=x86_64 -B build-x64 .
+    cmake -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=10.12 -B build-x64 .
     cmake --build build-x64 --config Release
     popd
 
@@ -46,14 +46,14 @@ build() {
 
     echo "Dumping $name binary"
     otool -l $APPBASE/Contents/MacOS/"$name"
-        RL_MINOS=$(otool -l $APPBASE/Contents/MacOS/"$name" | awk '/LC_BUILD_VERSION/{f=1} f && /minos/{print $2; exit}')
-            JAVA_MINOS=$(otool -l $APPBASE/Contents/Resources/jre/lib/libjava.dylib | awk '/LC_BUILD_VERSION/{f=1} f && /minos/{print $2; exit}')
-            echo "minos: RL: $RL_MINOS Java: $JAVA_MINOS"
+    RL_MINOS=$(otool -l $APPBASE/Contents/MacOS/"$name" | awk '/LC_VERSION_MIN_MACOSX/{f=1} f && /version/{print $2; exit}')
+    JAVA_MINOS=$(otool -l $APPBASE/Contents/Resources/jre/lib/libjava.dylib | awk '/LC_VERSION_MIN_MACOSX/{f=1} f && /version/{print $2; exit}')
+    echo "minos: RL: $RL_MINOS Java: $JAVA_MINOS"
 
-            if [ "$(printf '%s\n%s\n' "$RL_MINOS" "$JAVA_MINOS" | sort -V | tail -n1)" = "$JAVA_MINOS" ] && [ "$JAVA_MINOS" != "$RL_MINOS" ] ; then
-                echo "Java minimum macOS version ($JAVA_MINOS) is greater than RuneLite minimum macOS version ($RL_MINOS)"
-                exit 1
-            fi
+    if [ "$(printf '%s\n%s\n' "$RL_MINOS" "$JAVA_MINOS" | sort -V | tail -n1)" = "$JAVA_MINOS" ] && [ "$JAVA_MINOS" != "$RL_MINOS" ] ; then
+        echo "Java minimum macOS version ($JAVA_MINOS) is greater than $name minimum macOS version ($RL_MINOS)"
+        exit 1
+    fi
 }
 
 dmg() {
