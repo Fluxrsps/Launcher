@@ -894,8 +894,40 @@ public class Launcher
 	}
 
 	static boolean isJava17() {
+		return getJavaMajorVersion() >= 17;
+	}
+
+	/**
+	 * Parses the major version out of the java.version system property, which is
+	 * "1.8.0_292" on 8 and below and "11.0.31", "17.0.19" or "21-ea" on 9 and above.
+	 *
+	 * @return the major version, or -1 if it could not be determined
+	 */
+	static int getJavaMajorVersion() {
 		String version = System.getProperty("java.version");
-		return version.startsWith("1.") && Integer.parseInt(version.substring(2, 3)) >= 7;
+		if (version == null)
+		{
+			return -1;
+		}
+
+		if (version.startsWith("1."))
+		{
+			version = version.substring(2);
+		}
+
+		int end = 0;
+		while (end < version.length() && Character.isDigit(version.charAt(end)))
+		{
+			++end;
+		}
+
+		if (end == 0)
+		{
+			log.warn("Unable to parse java.version \"{}\"", System.getProperty("java.version"));
+			return -1;
+		}
+
+		return Integer.parseInt(version.substring(0, end));
 	}
 
 	private static void postInstall(LauncherSettings settings)
