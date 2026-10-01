@@ -171,16 +171,6 @@ jobs:
       run: ./gradlew exportAppName
     - name: build
       run: ./gradlew build -P RUNELITE_BUILD=$RUNELITE_PROFILE
-    - name: clone create-dmg
-      run: git clone https://github.com/runelite/create-dmg -b runelite-1.0
-    - name: build create-dmg
-      run: |
-        set -e
-        cd create-dmg
-        npm install
-        ln -s cli.js create-dmg
-        chmod +x create-dmg
-    - run: echo create-dmg >> $GITHUB_PATH
     - name: cmod macos-x64
       run: chmod +x ./build-osx-x64.sh
     - name: macos-x64
