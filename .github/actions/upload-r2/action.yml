@@ -1,0 +1,188 @@
+name: Upload to Cloudflare R2
+description: >
+  Uploads build artifacts to a Cloudflare R2 bucket. Silently no-ops when the
+  R2 credentials are not configured, so the normal GitHub artifact upload stays
+  the source of truth.
+
+inputs:
+  files:
+    description: Newline separated list of files to upload. Missing files are skipped.
+    required: true
+  prefix:
+    description: Key prefix inside the bucket.
+    required: false
+    default: installers
+  account-id:
+    description: Cloudflare account id (secrets.R2_ACCOUNT_ID).
+    required: true
+  access-key-id:
+    description: R2 access key id (secrets.R2_ACCESS_KEY_ID).
+    required: true
+  secret-access-key:
+    description: R2 secret access key (secrets.R2_SECRET_ACCESS_KEY).
+    required: true
+  bucket:
+    description: R2 bucket name (secrets.R2_BUCKET).
+    required: true
+  cache-control:
+    description: >
+      Cache-Control stored on each object. The default lets the Cloudflare edge
+      hold the file indefinitely (purged below on every publish) while browsers
+      revalidate on each request, so nobody is stuck with a stale installer in
+      their local cache.
+    required: false
+    default: public, max-age=0, s-maxage=31536000, must-revalidate
+  cdn-base:
+    description: Public CDN base URL for the uploaded files, used to build purge URLs.
+    required: false
+    default: ''
+  cloudflare-api-token:
+    description: API token with the Zone > Cache Purge permission. Purge is skipped if empty.
+    required: false
+    default: ''
+  cloudflare-zone-id:
+    description: Zone id of the CDN hostname. Purge is skipped if empty.
+    required: false
+    default: ''
+
+outputs:
+  uploaded:
+    description: Space separated list of file names that were successfully uploaded.
+    value: ${{ steps.upload.outputs.uploaded }}
+
+runs:
+  using: composite
+  steps:
+    - name: Upload to R2
+      id: upload
+      shell: bash
+      env:
+        R2_ACCOUNT_ID: ${{ inputs.account-id }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.access-key-id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.secret-access-key }}
+        R2_BUCKET: ${{ inputs.bucket }}
+        R2_PREFIX: ${{ inputs.prefix }}
+        R2_FILES: ${{ inputs.files }}
+        R2_CACHE_CONTROL: ${{ inputs.cache-control }}
+        AWS_DEFAULT_REGION: auto
+        # R2 rejects the newer default checksum headers sent by aws-cli v2.23+
+        AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+        AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+      run: |
+        set -eu
+
+        echo "uploaded=" >> "${GITHUB_OUTPUT}"
+
+        if [ -z "${R2_ACCOUNT_ID}" ] || [ -z "${AWS_ACCESS_KEY_ID}" ] || \
+           [ -z "${AWS_SECRET_ACCESS_KEY}" ] || [ -z "${R2_BUCKET}" ]; then
+          echo "R2 credentials not configured - skipping upload."
+          exit 0
+        fi
+
+        if ! command -v aws >/dev/null 2>&1; then
+          echo "Installing aws-cli..."
+          if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl unzip
+          fi
+          case "$(uname -m)" in
+            aarch64|arm64) AWS_ARCH=aarch64 ;;
+            *)             AWS_ARCH=x86_64 ;;
+          esac
+          curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${AWS_ARCH}.zip" -o /tmp/awscliv2.zip
+          unzip -q /tmp/awscliv2.zip -d /tmp
+          /tmp/aws/install
+        fi
+
+        endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+        status=0
+        uploaded=""
+
+        while IFS= read -r file; do
+          file="$(echo "${file}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+          if [ -z "${file}" ]; then
+            continue
+          fi
+
+          if [ ! -f "${file}" ]; then
+            echo "::warning::${file} not found - skipping."
+            continue
+          fi
+
+          name="$(basename "${file}")"
+          case "${name}" in
+            *.apk) content_type=application/vnd.android.package-archive ;;
+            *)     content_type=application/octet-stream ;;
+          esac
+
+          echo "Uploading ${name} -> s3://${R2_BUCKET}/${R2_PREFIX}/${name}"
+          if aws s3 cp "${file}" "s3://${R2_BUCKET}/${R2_PREFIX}/${name}" \
+                --endpoint-url "${endpoint}" \
+                --content-type "${content_type}" \
+                --cache-control "${R2_CACHE_CONTROL}" \
+                --only-show-errors; then
+            uploaded="${uploaded}${uploaded:+ }${name}"
+          else
+            echo "::warning::Failed to upload ${name} to R2."
+            status=1
+          fi
+        done <<EOF
+        ${R2_FILES}
+        EOF
+
+        echo "uploaded=${uploaded}" >> "${GITHUB_OUTPUT}"
+        exit ${status}
+
+    - name: Purge Cloudflare cache
+      if: always() && steps.upload.outputs.uploaded != ''
+      shell: bash
+      env:
+        UPLOADED: ${{ steps.upload.outputs.uploaded }}
+        CDN_BASE: ${{ inputs.cdn-base }}
+        CF_API_TOKEN: ${{ inputs.cloudflare-api-token }}
+        CF_ZONE_ID: ${{ inputs.cloudflare-zone-id }}
+      run: |
+        set -eu
+
+        if [ -z "${CF_API_TOKEN}" ] || [ -z "${CF_ZONE_ID}" ] || [ -z "${CDN_BASE}" ]; then
+          echo "Cloudflare purge not configured - edge cache will expire on its own."
+          exit 0
+        fi
+
+        # Cloudflare accepts at most 30 URLs per purge call.
+        purge() {
+          echo "Purging:${1}" | tr ' ' '\n'
+          files=""
+          for name in $1; do
+            files="${files}${files:+,}\"${CDN_BASE}/${name}\""
+          done
+
+          response="$(curl -sS -X POST \
+            "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/purge_cache" \
+            -H "Authorization: Bearer ${CF_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data "{\"files\":[${files}]}")"
+
+          case "${response}" in
+            *'"success":true'*) echo "Purge ok." ;;
+            *) echo "::warning::Cloudflare purge failed: ${response}"; return 1 ;;
+          esac
+        }
+
+        batch=""
+        count=0
+        status=0
+        for name in ${UPLOADED}; do
+          batch="${batch}${batch:+ }${name}"
+          count=$((count + 1))
+          if [ "${count}" -eq 30 ]; then
+            purge "${batch}" || status=1
+            batch=""
+            count=0
+          fi
+        done
+        if [ -n "${batch}" ]; then
+          purge "${batch}" || status=1
+        fi
+
+        exit ${status}

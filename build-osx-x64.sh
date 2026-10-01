@@ -2,6 +2,8 @@
 
 set -e
 
+PATH=$PATH:tools/create-dmg
+
 name="$1"
 nameLowercase="$2"
 
@@ -12,7 +14,7 @@ build() {
     shasum -a 256 build/libs/"$name".jar
 
     pushd native
-    cmake -DCMAKE_OSX_ARCHITECTURES=x86_64 -B build-x64 .
+    cmake -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=10.12 -B build-x64 .
     cmake --build build-x64 --config Release
     popd
 
@@ -46,37 +48,34 @@ build() {
 
     echo "Dumping $name binary"
     otool -l $APPBASE/Contents/MacOS/"$name"
-        RL_MINOS=$(otool -l $APPBASE/Contents/MacOS/"$name" | awk '/LC_BUILD_VERSION/{f=1} f && /minos/{print $2; exit}')
-            JAVA_MINOS=$(otool -l $APPBASE/Contents/Resources/jre/lib/libjava.dylib | awk '/LC_BUILD_VERSION/{f=1} f && /minos/{print $2; exit}')
-            echo "minos: RL: $RL_MINOS Java: $JAVA_MINOS"
+    RL_MINOS=$(otool -l $APPBASE/Contents/MacOS/"$name" | awk '/LC_VERSION_MIN_MACOSX/{f=1} f && /version/{print $2; exit}')
+    JAVA_MINOS=$(otool -l $APPBASE/Contents/Resources/jre/lib/libjava.dylib | awk '/LC_VERSION_MIN_MACOSX/{f=1} f && /version/{print $2; exit}')
+    echo "minos: RL: $RL_MINOS Java: $JAVA_MINOS"
 
-            if [ "$(printf '%s\n%s\n' "$RL_MINOS" "$JAVA_MINOS" | sort -V | tail -n1)" = "$JAVA_MINOS" ] && [ "$JAVA_MINOS" != "$RL_MINOS" ] ; then
-                echo "Java minimum macOS version ($JAVA_MINOS) is greater than RuneLite minimum macOS version ($RL_MINOS)"
-                exit 1
-            fi
+    if [ "$(printf '%s\n%s\n' "$RL_MINOS" "$JAVA_MINOS" | sort -V | tail -n1)" = "$JAVA_MINOS" ] && [ "$JAVA_MINOS" != "$RL_MINOS" ] ; then
+        echo "Java minimum macOS version ($JAVA_MINOS) is greater than $name minimum macOS version ($RL_MINOS)"
+        exit 1
+    fi
 }
 
 dmg() {
     SIGNING_IDENTITY="Developer ID Application"
     codesign -f -s "${SIGNING_IDENTITY}" --entitlements osx/signing.entitlements --options runtime $APPBASE || true
 
-    # create-dmg exits with an error code due to no code signing, but is still okay
-    # note we use Adam-/create-dmg as upstream does not support UDBZ
-    create-dmg --format UDBZ $APPBASE . || true
-    mv "$name"\ *.dmg "$name"-x64.dmg
+    create-dmg \
+      --volname "$name" \
+      --volicon osx/runelite.icns \
+      --window-size 660 400 \
+      --icon-size 160 \
+      --icon "$name".app 180 170 \
+      --app-drop-link 480 170 \
+      --format ULFO \
+      --filesystem APFS \
+      "$name"-x64.dmg \
+      $APPBASE
 
     # dump for CI
     hdiutil imageinfo "$name"-x64.dmg
-
-    if ! hdiutil imageinfo "$name"-x64.dmg | grep -q "Format: UDBZ" ; then
-        echo "Format of resulting dmg was not UDBZ, make sure your create-dmg has support for --format"
-        exit 1
-    fi
-
-    if ! hdiutil imageinfo "$name"-x64.dmg | grep -q "Apple_HFS" ; then
-        echo Filesystem of dmg is not Apple_HFS
-        exit 1
-    fi
 
     # Notarize app
     if xcrun notarytool submit "$name"-x64.dmg --wait --keychain-profile "AC_PASSWORD" ; then

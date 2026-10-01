@@ -2,6 +2,8 @@
 
 set -e
 
+PATH=$PATH:tools/create-dmg
+
 name="$1"
 nameLowercase="$2"
 
@@ -12,7 +14,7 @@ build() {
     shasum -a 256 build/libs/"$name".jar
 
     pushd native
-    cmake -DCMAKE_OSX_ARCHITECTURES=arm64 -B build-aarch64 .
+    cmake -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -B build-aarch64 .
     cmake --build build-aarch64 --config Release
     popd
 
@@ -62,22 +64,20 @@ dmg() {
     SIGNING_IDENTITY="Developer ID Application"
     codesign -f -s "${SIGNING_IDENTITY}" --entitlements osx/signing.entitlements --options runtime $APPBASE || true
 
-    # create-dmg exits with an error code due to no code signing, but is still okay
-    create-dmg $APPBASE . || true
-    mv "$name"\ *.dmg "$name"-aarch64.dmg
+    create-dmg \
+      --volname "$name" \
+      --volicon osx/runelite.icns \
+      --window-size 660 400 \
+      --icon-size 160 \
+      --icon "$name".app 180 170 \
+      --app-drop-link 480 170 \
+      --format ULFO \
+      --filesystem APFS \
+      "$name"-aarch64.dmg \
+      $APPBASE
 
     # dump for CI
     hdiutil imageinfo "$name"-aarch64.dmg
-
-    if ! hdiutil imageinfo "$name"-aarch64.dmg | grep -q "Format: ULFO" ; then
-        echo Format of dmg is not ULFO
-        exit 1
-    fi
-
-    if ! hdiutil imageinfo "$name"-aarch64.dmg | grep -q "Apple_HFS" ; then
-        echo Filesystem of dmg is not Apple_HFS
-        exit 1
-    fi
 
     # Notarize app
     if xcrun notarytool submit "$name"-aarch64.dmg --wait --keychain-profile "AC_PASSWORD" ; then

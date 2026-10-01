@@ -37,7 +37,7 @@ repositories {
 }
 
 group = "net.runelite"
-version = "2.7.6-SNAPSHOT"
+version = "2.8.1-SNAPSHOT"
 description = "RuneLite Launcher"
 
 extra.apply {
