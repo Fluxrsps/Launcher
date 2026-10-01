@@ -8,6 +8,8 @@ env:
 jobs:
   windows:
     runs-on: windows-2022
+    outputs:
+      uploaded: ${{ steps.r2.outputs.uploaded }}
     steps:
     - uses: actions/checkout@v4
       with:
@@ -67,11 +69,30 @@ jobs:
           ${{ env.GRADLE_APP_NAME }}Setup32.exe
           ${{ env.GRADLE_APP_NAME }}SetupAArch64.exe
         if-no-files-found: error
+    - name: upload to R2
+      id: r2
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      continue-on-error: true
+      uses: ./.github/actions/upload-r2
+      with:
+        account-id: ${{ secrets.R2_ACCOUNT_ID }}
+        access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
+        secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        bucket: ${{ secrets.R2_BUCKET }}
+        cdn-base: ${{ vars.CDN_BASE_URL || 'https://cdn.fluxious-rsps.com/installers' }}
+        cloudflare-api-token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        cloudflare-zone-id: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+        files: |
+          ${{ env.GRADLE_APP_NAME }}Setup.exe
+          ${{ env.GRADLE_APP_NAME }}Setup32.exe
+          ${{ env.GRADLE_APP_NAME }}SetupAArch64.exe
   linux:
     runs-on: ubuntu-24.04
     container:
       image: amd64/ubuntu:20.04
       options: --privileged
+    outputs:
+      uploaded: ${{ steps.r2.outputs.uploaded }}
     steps:
     - run: apt update
     - run: DEBIAN_FRONTEND=noninteractive apt install -y gcc-9-aarch64-linux-gnu g++-9-aarch64-linux-gnu g++ cmake git curl fuse file
@@ -109,6 +130,26 @@ jobs:
           ${{ env.GRADLE_APP_NAME }}.AppImage
           ${{ env.GRADLE_APP_NAME }}-aarch64.AppImage
         if-no-files-found: error
+    - name: upload to R2
+      id: r2
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      continue-on-error: true
+      uses: ./.github/actions/upload-r2
+      with:
+        account-id: ${{ secrets.R2_ACCOUNT_ID }}
+        access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
+        secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        bucket: ${{ secrets.R2_BUCKET }}
+        cdn-base: ${{ vars.CDN_BASE_URL || 'https://cdn.fluxious-rsps.com/installers' }}
+        cloudflare-api-token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        cloudflare-zone-id: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+        files: |
+          build/libs/${{ env.GRADLE_APP_NAME }}.jar
+          ${{ env.GRADLE_APP_NAME }}.AppImage
+          ${{ env.GRADLE_APP_NAME }}-aarch64.AppImage
+          appimagetool-x86_64.AppImage
+          runtime-x86_64
+          runtime-aarch64
   macos:
     runs-on: macos-15-intel
     steps:
@@ -164,3 +205,70 @@ jobs:
         path: |
           app.tar
         if-no-files-found: error
+  notify:
+    needs: [ windows, linux ]
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    steps:
+    - name: Announce CDN upload on Discord
+      env:
+        DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        CDN_BASE: ${{ vars.CDN_BASE_URL || 'https://cdn.fluxious-rsps.com/installers' }}
+        WINDOWS_FILES: ${{ needs.windows.outputs.uploaded }}
+        LINUX_FILES: ${{ needs.linux.outputs.uploaded }}
+        COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        COMMIT_SHA: ${{ github.sha }}
+        COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        ACTOR: ${{ github.actor }}
+      run: |
+        set -eu
+
+        if [ -z "${DISCORD_WEBHOOK}" ]; then
+          echo "DISCORD_WEBHOOK not configured - skipping notification."
+          exit 0
+        fi
+
+        if [ -z "${WINDOWS_FILES}" ] && [ -z "${LINUX_FILES}" ]; then
+          echo "Nothing was uploaded to the CDN - skipping notification."
+          exit 0
+        fi
+
+        # Turns "A.exe B.exe" into a markdown bullet list of CDN links.
+        links() {
+          for name in $1; do
+            printf -- '- [%s](%s/%s)\n' "${name}" "${CDN_BASE}" "${name}"
+          done
+        }
+
+        fields='[]'
+        if [ -n "${WINDOWS_FILES}" ]; then
+          fields="$(jq -n --argjson f "${fields}" --arg v "$(links "${WINDOWS_FILES}")" \
+            '$f + [{name: "Windows", value: $v, inline: true}]')"
+        fi
+        if [ -n "${LINUX_FILES}" ]; then
+          fields="$(jq -n --argjson f "${fields}" --arg v "$(links "${LINUX_FILES}")" \
+            '$f + [{name: "Linux", value: $v, inline: true}]')"
+        fi
+
+        jq -n \
+          --argjson fields "${fields}" \
+          --arg desc "$(printf '[\`%s\`](%s) %s\nby **%s** · [build log](%s)' \
+            "$(echo "${COMMIT_SHA}" | cut -c1-7)" "${COMMIT_URL}" \
+            "$(echo "${COMMIT_MESSAGE}" | head -n 1)" "${ACTOR}" "${RUN_URL}")" \
+          --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          '{
+             username: "Fluxious CI",
+             embeds: [{
+               title: "Client published to CDN",
+               description: $desc,
+               color: 3066993,
+               fields: $fields,
+               timestamp: $ts
+             }]
+           }' > payload.json
+
+        curl -sS -f -X POST \
+          -H "Content-Type: application/json" \
+          -d @payload.json \
+          "${DISCORD_WEBHOOK}"

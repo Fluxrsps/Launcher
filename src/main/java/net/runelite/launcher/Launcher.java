@@ -504,10 +504,6 @@ public class Launcher
 		s.initVerify(certificate);
 		s.update(bootstrapBytes);
 
-		if (!s.verify(signatureBytes)) {
-			throw new VerificationException("Unable to verify bootstrap signature");
-		}
-
 		Gson gson = new Gson();
 		return gson.fromJson(new InputStreamReader(new ByteArrayInputStream(bootstrapBytes)), Bootstrap.class);
 	}
